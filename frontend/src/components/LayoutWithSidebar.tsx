@@ -10,7 +10,7 @@ export default function LayoutWithSidebar({ children }: { children: React.ReactN
 
   if (status === "loading") {
     <div className="min-h-screen flex justify-center items-center bg-gradient-to-br from-gray-100 to-gray-300">
-        <HashLoader color="#0dcaf0" size={40} />
+        <HashLoader color="#3182ce" size={40} />
     </div>
   }
 

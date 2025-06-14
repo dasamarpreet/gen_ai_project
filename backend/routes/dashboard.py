@@ -1,4 +1,5 @@
-from fastapi import Depends, HTTPException, APIRouter, Query
+from fastapi import Depends, HTTPException, APIRouter, Query, status
+from fastapi.responses import JSONResponse
 from datetime import datetime
 from utils.jwt_token_config import validate_token
 from pydantic import BaseModel
@@ -8,14 +9,19 @@ from sqlalchemy.orm import Session
 from sqlalchemy import or_
 from typing import List
 from utils.get_prompt_response import get_ai_response
+import time
 
 
 router = APIRouter()
 
 
-class NewQueryPayload(BaseModel):
+class QueryPayload(BaseModel):
     query: str
-    
+
+class ContinueChatPayload(BaseModel):
+    query: str
+    thread_id: int
+
 class ChatHistoryRes(BaseModel):
     id: int
     thread_id: int
@@ -42,7 +48,7 @@ class PaginatedHistoryResponse(BaseModel):
 
 
 @router.post('/new-query')
-def new_query(payload: NewQueryPayload, user_data: dict = Depends(validate_token), db: Session = Depends(get_db)):
+def new_query(payload: QueryPayload, user_data: dict = Depends(validate_token), db: Session = Depends(get_db)):
     
     if not user_data.get("valid"):
         print('expiredddddd')
@@ -52,6 +58,10 @@ def new_query(payload: NewQueryPayload, user_data: dict = Depends(validate_token
 
     if not user_id:
         raise HTTPException(status_code=400, detail="Missing user Id")
+
+    user = db.query(Users).filter_by(id=user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User doesn't exists!")
 
     try:
         # user_obj = db.query(Users).filter_by(id=user_id)
@@ -64,18 +74,64 @@ def new_query(payload: NewQueryPayload, user_data: dict = Depends(validate_token
         db.commit()
         db.refresh(new_thread_entry)
 
-        new_history_entry = ChatHistory(thread_id=new_thread_entry.id, query=query, response="Test")
+        ai_res = get_ai_response(prompt=query)
+
+        new_history_entry = ChatHistory(thread_id=new_thread_entry.id, query=query, response=ai_res)
         db.add(new_history_entry)
         db.commit()
         db.refresh(new_history_entry)
-
-        ai_res = get_ai_response(prompt=query)
 
         return {
             "message": "New Threads and History Created Succesfully!",
             "thread_id": new_thread_entry.id,
             "query": query,
-            "ai_response": ai_res
+            "ai_response": ai_res,
+            "created_at": new_history_entry.created_at.isoformat(),
+            }
+
+    except Exception as e:
+        print("Error here: ", e)
+        raise HTTPException(status_code=500, detail="Something went wrong on our side")
+
+
+@router.post('/continue-chat', response_model=ChatHistoryRes)
+def continue_chat(payload: ContinueChatPayload, user_data: dict = Depends(validate_token), db: Session = Depends(get_db)):
+    
+    if not user_data.get("valid"):
+        print('expiredddddd')
+        return {"message": "Token Expired! Re-login"}
+
+    user_id = user_data.get("user_id")
+
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Missing user Id")
+
+    user = db.query(Users).filter_by(id=user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User doesn't exists!")
+
+    try:
+        # user_obj = db.query(Users).filter_by(id=user_id)
+
+        query = payload.query
+        thread_id = payload.thread_id
+
+        # time.sleep(120)
+
+        ai_res = get_ai_response(prompt=query)
+
+        new_chat_history_entry = ChatHistory(thread_id=thread_id, query=query, response=ai_res)
+        db.add(new_chat_history_entry)
+        db.commit()
+        db.refresh(new_chat_history_entry)
+
+
+        return {
+            "id": new_chat_history_entry.id,
+            "thread_id": thread_id,
+            "query": query,
+            "response": ai_res,
+            "created_at": new_chat_history_entry.created_at.isoformat(),
             }
 
     except Exception as e:
@@ -98,6 +154,10 @@ def user_histories(
     user_id = user_data.get("user_id")
     if not user_id:
         raise HTTPException(status_code=400, detail="Missing user Id")
+    
+    user = db.query(Users).filter_by(id=user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User doesn't exists!")
 
     try:
         user_threads = db.query(ChatThreads).filter_by(user_id=user_id).order_by(ChatThreads.id.desc()).all()
@@ -119,10 +179,58 @@ def user_histories(
             "total": total,
             "page": page,
             "limit": limit,
-            "histories": [ChatHistoryRes.from_orm(history) for history in paginated_histories]
+            "histories": [ChatHistoryRes.from_orm(history).model_dump() for history in paginated_histories]
         }
 
     except Exception as e:
         print("Error here: ", e)
         raise HTTPException(status_code=500, detail="Something went wrong on our side")
 
+
+# Endpoint to fetch the user's chat history based on thread ID
+@router.get("/chat-history/{thread_id}", response_model=List[ChatHistoryRes])
+def get_chat_history(thread_id: int, user_data: dict = Depends(validate_token), db: Session = Depends(get_db)):
+
+    if not user_data.get("valid"):
+        return {"message": "Token Expired! Re-login"}
+
+    user_id = user_data.get("user_id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Missing user Id")
+    
+    user = db.query(Users).filter_by(id=user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User doesn't exists!")
+    
+    chat_thread = db.query(ChatThreads).filter_by(id=thread_id).first()
+
+    if not chat_thread:
+        raise HTTPException(status_code=404, detail="Thread doesn't exists!")
+
+    if user_id != chat_thread.user_id:
+        raise HTTPException(status_code=403, detail="Access denied!")
+
+    try:
+        chat_history = db.query(ChatHistory).filter_by(thread_id=thread_id).order_by(ChatHistory.created_at.asc()).all()
+
+        res_data = []
+        for history in chat_history:
+            res_data.append(
+                {
+                    "id": history.id,
+                    "thread_id": thread_id,
+                    "query": f"{history.query}",
+                    "response": f"{history.response}",
+                    "created_at": f"{history.created_at}",
+                }
+            )
+
+        print("Res data ", res_data)
+
+        return res_data
+
+    except Exception as e:
+        print("Error here2222: ", e)
+        raise HTTPException(status_code=500, detail="Something went wrong on our side")
+
+    

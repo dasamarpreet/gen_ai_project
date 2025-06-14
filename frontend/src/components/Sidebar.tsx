@@ -25,7 +25,7 @@ export default function Sidebar() {
   const [hasMore, setHasMore] = useState(true);
 
   // Function to fetch chat history
-  const fetchChatHistory = async () => {
+  const fetchChatHistoryList = async () => {
   if (!session?.accessToken || loadingRef.current) return;
 
   loadingRef.current = true;
@@ -73,13 +73,13 @@ export default function Sidebar() {
     const target = e.target as HTMLDivElement;
     const atBottom = target.scrollTop + target.clientHeight >= target.scrollHeight - 5;
     if (atBottom && hasMore) {
-      fetchChatHistory();
+      fetchChatHistoryList();
     }
   };
 
   useEffect(() => {
     if (pageRef.current === 1 && threads.length === 0) {
-      fetchChatHistory();
+      fetchChatHistoryList();
     }
   }, [session]);
 
